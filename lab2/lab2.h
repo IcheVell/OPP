@@ -9,8 +9,6 @@
 
 #define MIN_COUNT_ARGS 2
 #define EPSILON 0.0001
-#define TAY 0.01
-#define MAX_COUNT_ITERATIONS 10000000
 
 void simpleIterationMethod(char** argv);
 
