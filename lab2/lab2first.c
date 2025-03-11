@@ -26,11 +26,15 @@ void simpleIterationMethod(char** argv) {
     initMatrix(A, N);
     initUVector(u, N);
     initBRandomVector(A, b, u, N);
+    printVector(b, N);
     initZeroVector(x, N);
     initZeroVector(tempVector, N);
 
-    while ((calculateDoubleNorm(tempVector, A, x, b, N) > EPSILON)) {
-        calculateNewIteration(tempVector, A, x, b, N);
+    double norm;
+    
+    while ((norm = calculateDoubleNorm(tempVector, A, x, b, N)) > EPSILON) {
+        //printf("%lf ", norm);
+        //calculateNewIteration(tempVector, A, x, b, N);
     }
 
     freeMatrix(A, N);
@@ -143,6 +147,7 @@ void vectorSub(double* tempVector, double* b, int N) {
 
 
 void scalarMult(double* tempVector, double scalar, int N) {
+    printf("%lf\n", scalar);
     #pragma omp parallel for schedule(guided)
     for (int i = 0; i < N; i++) {
         tempVector[i] *= scalar;
