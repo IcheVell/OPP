@@ -7,7 +7,6 @@ int main(int argc, char** argv) {
     }
     try {
         simpleIterationMethod(argc, argv);
-
     } catch (std::exception& e) {
         std::cerr << e.what();
     }
@@ -18,7 +17,7 @@ int main(int argc, char** argv) {
 void simpleIterationMethod(int argc, char** argv) {
     int N = std::stoi(argv[1]);
     if (N <= 0) {
-        throw std::invalid_argument("Invalid matrix size: " + N);
+        throw std::invalid_argument("Invalid matrix size: " + std::to_string(N));
     }
 
     MPI_Init(&argc, &argv);
@@ -37,23 +36,31 @@ void simpleIterationMethod(int argc, char** argv) {
     std::vector<double> u(N, 0);
 
     initLocalMatrix(localMatrix, N, rank, rowsPerProcess, localCountRows);
-    initU(u, N, rank, rowsPerProcess);
+    initU(u, N);
     initB(localB, u, localMatrix, localCountRows, size, N, rank);
 
     double residual;
     int iter = 0;
 
     do {
-        residual = computeResidual(localX, localB, localMatrix, localCountRows, N, rank, size);
+        residual = computeResidual(localX, localB, localMatrix, localCountRows, N, rank, size, extra);
+        updateLocalX(localX, localB, localMatrix, localCountRows, N, rank, size, extra);
 
-        updateLocalX(localX, localB, localMatrix, localCountRows, N, rank, size);
-        
-        if (rank == 0) {
-            std::cout << "Iteration " << iter << ", Residual: " << residual << std::endl;
-        }
+        // if (rank == 0) {
+        //     std::cout << "Iteration " << iter << ", Residual: " << residual << std::endl;
+        // }
 
         iter++;
     } while (residual > EPSILON);
+
+    //std::cout << checkResult(localX, u, localCountRows, rank) << std::endl;
+
+    char procNames[MPI_MAX_PROCESSOR_NAME];
+    int nameLength;
+
+    MPI_Get_processor_name(procNames, &nameLength);
+
+    std::cout << "Process " << rank << " of " << size << " on " << procNames << std::endl;
 
     MPI_Finalize();
 }
@@ -64,9 +71,9 @@ void initLocalMatrix(std::vector<double>& localMatrix, int N, int rank, int rows
             localMatrix[i * N + j] = ((i + rank * rowsPerProc) == j) ? 2.0 : 1.0;
         }
     }
-} 
+}
 
-void initU(std::vector<double>& u, int N, int rank, int rowsPerProcess) {
+void initU(std::vector<double>& u, int N) {
     for (int i = 0; i < N; i++) {
         u[i] = sin(2.0 * M_PI * i / N);
         if (std::abs(u[i]) < 1e-15) {
@@ -83,32 +90,33 @@ void initB(std::vector<double>& localB, const std::vector<double>& u, const std:
     }
 }
 
-
-double computeResidual(const std::vector<double>& localX, const std::vector<double>& localB, 
-                       const std::vector<double>& localMatrix, int localCountRows, int N, int rank, int size) {
+double computeResidual(const std::vector<double>& localX, const std::vector<double>& localB, const std::vector<double>& localMatrix, int localCountRows, int N, int rank, int size, int extra) {
     double localResidual = 0.0;
     double localNormB = 0.0;
-    
-    std::vector<double> globalX(N, 0.0);
-    std::vector<int> recvCounts(size, 0);
-    std::vector<int> displs(size, 0);
-
-    int rowsPerProc = N / size;
-    int extra = N % size;
-
-    for (int i = 0; i < size; i++) {
-        recvCounts[i] = rowsPerProc + ((size - 1 == i) ? extra : 0);
-        displs[i] = (i == 0) ? 0 : (displs[i - 1] + recvCounts[i - 1]);
-    }
-
-    MPI_Allgatherv(localX.data(), localCountRows, MPI_DOUBLE, 
-                   globalX.data(), recvCounts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
-
+    std::vector<double> receivedX(localCountRows, 0.0);
     std::vector<double> localAx(localCountRows, 0.0);
 
     for (int i = 0; i < localCountRows; i++) {
-        for (int j = 0; j < N; j++) {
-            localAx[i] += localMatrix[i * N + j] * globalX[j];
+        for (int j = 0; j < localCountRows; j++) {
+            localAx[i] += localMatrix[i * N + (j + rank * localCountRows)] * localX[j];
+        }
+    }
+
+    MPI_Request requests[2];
+
+    for (int step = 0; step < size - 1; step++) {
+        int sendTo = (rank + step + 1) % size;
+        int recvFrom = (rank - step - 1 + size) % size;
+
+        MPI_Isend(localX.data(), localCountRows, MPI_DOUBLE, sendTo, 0, MPI_COMM_WORLD, &requests[0]);
+        MPI_Irecv(receivedX.data(), localCountRows, MPI_DOUBLE, recvFrom, 0, MPI_COMM_WORLD, &requests[1]);
+
+        MPI_Waitall(2, requests, MPI_STATUSES_IGNORE);
+
+        for (int i = 0; i < localCountRows; i++) {
+            for (int j = 0; j < localCountRows; j++) {
+                localAx[i] += localMatrix[i * N + (j + recvFrom * localCountRows)] * receivedX[j];
+            }
         }
     }
 
@@ -125,68 +133,46 @@ double computeResidual(const std::vector<double>& localX, const std::vector<doub
 }
 
 
-void updateLocalX(std::vector<double>& localX, const std::vector<double>& localB, 
-                  const std::vector<double>& localMatrix, int localCountRows, int N, int rank, int size) {
-    std::vector<double> globalX(N, 0.0);
+
+void updateLocalX(std::vector<double>& localX, const std::vector<double>& localB, const std::vector<double>& localMatrix, int localCountRows, int N, int rank, int size, int extra) {
+    std::vector<double> receivedX(localCountRows, 0.0);
     std::vector<double> localAx(localCountRows, 0.0);
-    
-    std::vector<int> recvCounts(size, 0);
-    std::vector<int> displs(size, 0);
-
-    int rowsPerProc = N / size;
-    int extra = N % size;
-
-    for (int i = 0; i < size; i++) {
-        recvCounts[i] = rowsPerProc + ((size - 1 == i) ? extra : 0);
-        displs[i] = (i == 0) ? 0 : (displs[i - 1] + recvCounts[i - 1]);
-    }
-
-    MPI_Allgatherv(localX.data(), localCountRows, MPI_DOUBLE, 
-                   globalX.data(), recvCounts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
 
     for (int i = 0; i < localCountRows; i++) {
-        for (int j = 0; j < N; j++) {
-            localAx[i] += localMatrix[i * N + j] * globalX[j];
+        for (int j = 0; j < localCountRows; j++) {
+            localAx[i] += localMatrix[i * N + (j + rank * localCountRows)] * localX[j];
+        }
+    }
+
+    MPI_Request requests[2];
+
+    for (int step = 0; step < size - 1; step++) {
+        int sendTo = (rank + step + 1) % size;
+        int recvFrom = (rank - step - 1 + size) % size;
+
+        MPI_Isend(localX.data(), localCountRows, MPI_DOUBLE, sendTo, 0, MPI_COMM_WORLD, &requests[0]);
+        MPI_Irecv(receivedX.data(), localCountRows, MPI_DOUBLE, recvFrom, 0, MPI_COMM_WORLD, &requests[1]);
+
+        MPI_Waitall(2, requests, MPI_STATUSES_IGNORE);
+
+        for (int i = 0; i < localCountRows; i++) {
+            for (int j = 0; j < localCountRows; j++) {
+                localAx[i] += localMatrix[i * N + (j + recvFrom * localCountRows)] * receivedX[j];
+            }
         }
     }
 
     for (int i = 0; i < localCountRows; i++) {
-        localX[i] = globalX[i + displs[rank]] - TAU * (localAx[i] - localB[i]);
+        localX[i] -= TAU * (localAx[i] - localB[i]);
     }
 }
 
 
-
-
-void printVector(std::vector<double> vec, int rank) {
-    MPI_Barrier(MPI_COMM_WORLD);
-    
-    std::cout << "Current rank is " << rank << std::endl;
-
-    for (auto it = vec.begin(); it != vec.end(); it++) {
-        std::cout << *it << " ";
-    }
-    
-    std::cout << std::endl;
-
-    MPI_Barrier(MPI_COMM_WORLD);
-}
-
-void printVector(std::vector<double> vec, int rank, int N) {
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    std::cout << "Current rank is " << rank << std::endl;
-    int counter = 0;
-    for (auto it = vec.begin(); it != vec.end(); it++) {
-        std::cout << *it << " ";
-
-        if (counter == N - 1) {
-            std::cout << std::endl;
-            counter = -1;
+bool checkResult(std::vector<double>& localX, std::vector<double>& u, int localCountRows, int rank) {
+    for (int i = 0; i < localCountRows; i++) {
+        if (std::abs(localX[i] - u[i + rank * localCountRows]) > EPSILON) {
+            return false;
         }
-
-        counter++;
     }
-
-    MPI_Barrier(MPI_COMM_WORLD);
+    return true;
 }

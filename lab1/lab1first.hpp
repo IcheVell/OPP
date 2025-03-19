@@ -8,9 +8,9 @@
 #include <cmath>
 #include <mpi.h>
 
-#define VALID_ARGC 2
-#define TAU 0.001
-#define EPSILON 1e-5
+const int VALID_ARGC = 2;
+const double TAU = 0.001;
+const double EPSILON = 1e-5;
 
 void simpleIterationMethod(int argc, char** argv);
 
@@ -22,4 +22,5 @@ void updateX(std::vector<double>& x, const std::vector<double>& b, const std::ve
 
 void printVector(std::vector<double> vec, int rank, int rowLen);
 void printVector(std::vector<double> vec, int rank);
+bool checkResult(std::vector<double>& x, std::vector<double>& u, int N);
 #endif

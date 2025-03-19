@@ -47,12 +47,23 @@ void simpleIterationMethod(int argc, char** argv) {
         residual = computeResidual(x, b, localMatrix, localCountRows, N, rank, size);
         updateX(x, b, localMatrix, localCountRows, N, rank, size);
         
-        if (rank == 0) {
-            std::cout << "Iteration " << iter << ", Residual: " << residual << std::endl;
-        }
+        // if (rank == 0) {
+        //     std::cout << "Iteration " << iter << ", Residual: " << residual << std::endl;
+        // }
 
         iter++;
     } while (residual > EPSILON);
+
+    // if (rank == 0) {
+    //     std::cout << checkResult(x, u, N) << std::endl;
+    // }
+
+    char procNames[MPI_MAX_PROCESSOR_NAME];
+    int nameLength;
+
+    MPI_Get_processor_name(procNames, &nameLength);
+
+    std::cout << "Process " << rank << " of " << size << " on " << procNames << std::endl;
 
     MPI_Finalize();
 }
@@ -151,37 +162,11 @@ void updateX(std::vector<double>& x, const std::vector<double>& b, const std::ve
     MPI_Allgatherv(localX.data(), localCountRows, MPI_DOUBLE, x.data(), recvCounts.data(), displs.data(), MPI_DOUBLE, MPI_COMM_WORLD);
 }
 
-
-
-void printVector(std::vector<double> vec, int rank) {
-    MPI_Barrier(MPI_COMM_WORLD);
-    
-    std::cout << "Current rank is " << rank << std::endl;
-
-    for (auto it = vec.begin(); it != vec.end(); it++) {
-        std::cout << *it << " ";
-    }
-    
-    std::cout << std::endl;
-
-    MPI_Barrier(MPI_COMM_WORLD);
-}
-
-void printVector(std::vector<double> vec, int rank, int N) {
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    std::cout << "Current rank is " << rank << std::endl;
-    int counter = 0;
-    for (auto it = vec.begin(); it != vec.end(); it++) {
-        std::cout << *it << " ";
-
-        if (counter == N - 1) {
-            std::cout << std::endl;
-            counter = -1;
+bool checkResult(std::vector<double>& x, std::vector<double>& u, int N) {
+    for (int i = 0; i < N; i++) {
+        if (std::abs(x[i] - u[i]) > EPSILON) {
+            return false;
         }
-
-        counter++;
     }
-
-    MPI_Barrier(MPI_COMM_WORLD);
+    return true;
 }
