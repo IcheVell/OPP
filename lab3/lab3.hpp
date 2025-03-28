@@ -17,4 +17,3 @@ void printMatrix(const std::vector<int>& matrix, int rows, int cols, const std::
 bool verifyMatrixMultiplication(const std::vector<int>& A, const std::vector<int>& B, const std::vector<int>& C_parallel, int N1, int N2, int N3);
 
 #endif
-

@@ -56,17 +56,11 @@ int main(int argc, char** argv) {
 
     std::vector<int> sendcountsA(p1, 0);
     std::vector<int> displsA(p1, 0);
-    std::vector<int> sendcountsB(p2, 0);
-    std::vector<int> displsB(p2, 0);
 
     if (rank == 0) {
         for (int i = 0; i < p1; i++) {
             sendcountsA[i] = blockRows * N2;
             displsA[i] = i * blockRows * N2;
-        }
-        for (int j = 0; j < p2; j++) {
-            sendcountsB[j] = 1;  
-            displsB[j] = j;      
         }
     }
 
@@ -137,14 +131,15 @@ void generateMatrix(std::vector<int>& matrix, int rows, int cols) {
 
 void multiplySubmatrices(const std::vector<int>& A, const std::vector<int>& B, std::vector<int>& C, int rowsA, int colsA, int colsB) {
     for (int i = 0; i < rowsA; i++) {
-        for (int j = 0; j < colsB; j++) {
-            C[i * colsB + j] = 0;
-            for (int k = 0; k < colsA; k++) {
-                C[i * colsB + j] += A[i * colsA + k] * B[k * colsB + j];
+        for (int k = 0; k < colsA; k++) {
+            int a = A[i * colsA + k];
+            for (int j = 0; j < colsB; j++) {
+                C[i * colsB + j] += a * B[k * colsB + j];
             }
         }
     }
 }
+
 
 void printMatrix(const std::vector<int>& matrix, int rows, int cols, const std::string& name) {
     std::cout << "Matrix " << name << ":\n";
