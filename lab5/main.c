@@ -1,158 +1,251 @@
 #include "main.h"
 
 int main(int argc, char **argv) {
-    MPI_Init_thread(&argc, &argv,
-                    MPI_THREAD_MULTIPLE, &(int){0});
+    Context ctx;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &ctx.provided);
+    if (ctx.provided < MPI_THREAD_MULTIPLE) {
+        fprintf(stderr, "MPI_THREAD_MULTIPLE not supported\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    MPI_Comm_rank(MPI_COMM_WORLD, &ctx.rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &ctx.size);
 
-    int rank, size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_dup(MPI_COMM_WORLD, &ctx.recv_comm);
 
-    for (int iter = 0; iter < ITER_MAX; iter++) {
-        TaskQueue queue;
-        queue.capacity = TASKS_PER_ITER * size;
-        queue.size     = TASKS_PER_ITER;
-        queue.data     = malloc(queue.capacity * sizeof(int));
-        pthread_mutex_init(&queue.mutex, NULL);
-
-        int weight = abs(rank - (iter % size)) + 1;
-        for (int i = 0; i < TASKS_PER_ITER; i++)
-            queue.data[i] = weight;
-
-        double globalRes = 0.0;
-        ThreadArgs args = {
-            .queue     = &queue,
-            .rank      = rank,
-            .size      = size,
-            .comm      = MPI_COMM_WORLD,
-            .globalRes = &globalRes
-        };
-
-        pthread_t listener, worker;
-        pthread_create(&listener, NULL,
-                       listener_thread, &args);
-        pthread_create(&worker, NULL,
-                       worker_thread, &args);
-
-        pthread_join(worker, NULL);
-        pthread_join(listener, NULL);
-
-        pthread_mutex_destroy(&queue.mutex);
-        free(queue.data);
-
-        MPI_Barrier(MPI_COMM_WORLD);
-        if (rank == 0) {
-            printf("Iteration %d: result = %f\n",
-                   iter, globalRes);
-        }
+    ctx.taskCount    = 0;
+    ctx.inProgress   = 0;
+    pthread_mutex_init(&ctx.taskMutex, NULL);
+    ctx.taskArray = malloc(INITIAL_TASK_COUNT * sizeof(Task));
+    if (!ctx.taskArray) {
+        perror("Can't allocate memory\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    MPI_Finalize();
-    return 0;
-}
+    pthread_t recvThr;
+    pthread_create(&recvThr, NULL, receiverThread, &ctx);
 
-int pop_task(TaskQueue *q, int *task) {
-    pthread_mutex_lock(&q->mutex);
-    if (q->size > 0) {
-        *task = q->data[--q->size];
-        pthread_mutex_unlock(&q->mutex);
-        return 1;
-    }
-    pthread_mutex_unlock(&q->mutex);
-    return 0;
-}
+    Task *initial = calloc(INITIAL_TASK_COUNT, sizeof(Task));
 
-int split_tasks(TaskQueue *q, int **out) {
-    pthread_mutex_lock(&q->mutex);
-    int count = q->size / 2;
-    if (count > 0) {
-        *out = malloc(count * sizeof(int));
-        for (int i = 0; i < count; i++)
-            (*out)[i] = q->data[q->size - count + i];
-        q->size -= count;
-    }
-    pthread_mutex_unlock(&q->mutex);
-    return count;
-}
+    //firstHalfAllDistribution(&ctx, initial);
+    //firstAllDistribution(&ctx, initial);
+    //sinDistribution(&ctx, initial);
+    //decreasingDistribution(&ctx, initial);
+    //increasingDistribution(&ctx, initial);
+    defaultDistribution(&ctx, initial);
 
-void *listener_thread(void *v) {
-    ThreadArgs *a = v;
-    MPI_Status  st;
-    int         buf;
+    normalizeGlobal(initial, INITIAL_TASK_COUNT);
 
+    printTotalWeightAllTasks(&ctx, initial);
+
+    addTasks(&ctx, initial, INITIAL_TASK_COUNT);
+    free(initial);
+
+    double timeStart = MPI_Wtime();
+    long long solvedWeight = 0;
     while (1) {
-        int flag;
-        MPI_Iprobe(MPI_ANY_SOURCE, TAG_TERMINATE, a->comm, &flag, &st);
-        if (flag) {
-            MPI_Recv(&buf, 1, MPI_INT, st.MPI_SOURCE,
-                     TAG_TERMINATE, a->comm, &st);
-            break;
+        int rep;
+        if (fetchTask(&ctx, &rep)) {
+            solvedWeight += rep;
+            for (int i = 0; i < rep; ++i) {
+                ctx.globalRes += sqrt(i) * sin(i) * cos(i);
+            }
+            pthread_mutex_lock(&ctx.taskMutex);
+            ctx.inProgress--;
+            pthread_mutex_unlock(&ctx.taskMutex);
+            continue;
         }
 
-        MPI_Recv(&buf, 1, MPI_INT, MPI_ANY_SOURCE,
-                 TAG_REQUEST, a->comm, &st);
-        int src = st.MPI_SOURCE;
+        int workFound = 0;
+        for (int d = 1; d < ctx.size && !workFound; ++d) {
+            int tgt = (ctx.rank + d) % ctx.size;
 
-        int *tasks_to_send = NULL;
-        int  cnt = split_tasks(a->queue, &tasks_to_send);
+            MPI_Send(NULL, 0, MPI_CHAR, tgt, TAG_REQUEST, ctx.recv_comm);
 
-        MPI_Send(&cnt, 1, MPI_INT, src, TAG_RESPONSE, a->comm);
-        if (cnt > 0) {
-            MPI_Send(tasks_to_send, cnt, MPI_INT,
-                     src, TAG_RESPONSE, a->comm);
-            free(tasks_to_send);
-        }
-    }
-
-    return NULL;
-}
-
-double heavy_compute(int repeats) {
-    double acc = 0.0;
-    for (int i = 0; i < repeats; i++) {
-        acc += sqrt(i);
-    }
-    return acc;
-}
-
-void *worker_thread(void *v) {
-    ThreadArgs *a = v;
-    MPI_Status  st;
-    int         dummy;
-    int         idle_rounds = 0;
-
-    while (1) {
-        int task;
-        if (pop_task(a->queue, &task)) {
-            *a->globalRes += heavy_compute(task);
-            idle_rounds = 0;
-        } else {
-            int next = (a->rank + 1) % a->size;
-            MPI_Send(&dummy, 1, MPI_INT, next,
-                     TAG_REQUEST, a->comm);
-
-            int cnt;
-            MPI_Recv(&cnt, 1, MPI_INT, next,
-                     TAG_RESPONSE, a->comm, &st);
-
-            if (cnt > 0) {
-                int *buf = malloc(cnt * sizeof(int));
-                MPI_Recv(buf, cnt, MPI_INT, next,
-                         TAG_RESPONSE, a->comm, &st);
-                pthread_mutex_lock(&a->queue->mutex);
-                for (int i = 0; i < cnt; i++)
-                    a->queue->data[a->queue->size++] = buf[i];
-                pthread_mutex_unlock(&a->queue->mutex);
+            int shareCount;
+            MPI_Recv(&shareCount, 1, MPI_INT, tgt, TAG_TASK_INFO, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (shareCount > 0) {
+                Task *buf = malloc(shareCount * sizeof(Task));
+                MPI_Recv(buf, shareCount * sizeof(Task), MPI_BYTE, tgt, TAG_TASK_DATA, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                addTasks(&ctx, buf, shareCount);
                 free(buf);
-                idle_rounds = 0;
-            } else {
-                if (++idle_rounds >= a->size) {
-                    MPI_Send(&dummy, 1, MPI_INT, a->rank,
-                             TAG_TERMINATE, a->comm);
-                    break;
-                }
+                workFound = 1;
+                break;
             }
         }
+        if (workFound) {
+            continue;
+        }
+
+        int localLeft = ctx.taskCount + ctx.inProgress;
+        int globalLeft;
+        MPI_Allreduce(&localLeft, &globalLeft, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        if (globalLeft == 0) {
+            break;
+        }
+    }
+
+    double timeEnd = MPI_Wtime();
+    double totalTime = timeEnd - timeStart;
+
+    printf("Rank %d solved total weight = %lld\n", ctx.rank, solvedWeight);
+    fflush(stdout);
+
+    if (ctx.rank == 0) {
+        printf("Total loops time: %f s\n", totalTime);
+        fflush(stdout);
+    }
+
+    for (int p = 0; p < ctx.size; ++p) {
+        if (p == ctx.rank) continue;
+        MPI_Send(NULL, 0, MPI_CHAR, p, TAG_TERMINATE, ctx.recv_comm);
+    }
+    pthread_join(recvThr, NULL);
+
+    free(ctx.taskArray);
+    pthread_mutex_destroy(&ctx.taskMutex);
+    MPI_Comm_free(&ctx.recv_comm);
+    MPI_Finalize();
+
+    if (ctx.rank == 0) {
+        fprintf(stderr, "Job succeeded\n");
+    }
+    return 0;
+}
+
+void addTasks(Context *ctx, const Task *tasks, int count) {
+    pthread_mutex_lock(&ctx->taskMutex);
+    for (int i = 0; i < count; ++i) {
+        ctx->taskArray[ctx->taskCount++] = tasks[i];
+    }
+    pthread_mutex_unlock(&ctx->taskMutex);
+}
+
+bool fetchTask(Context *ctx, int *rep) {
+    pthread_mutex_lock(&ctx->taskMutex);
+    if (ctx->taskCount > 0) {
+        *rep = ctx->taskArray[--ctx->taskCount].repeatNum;
+        ctx->inProgress++;
+        pthread_mutex_unlock(&ctx->taskMutex);
+        return true;
+    }
+    pthread_mutex_unlock(&ctx->taskMutex);
+    return false;
+}
+
+void *receiverThread(void *arg) {
+    Context *ctx = (Context*)arg;
+    MPI_Status status;
+
+    while (1) {
+        MPI_Recv(NULL, 0, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, ctx->recv_comm, &status);
+
+        if (status.MPI_TAG == TAG_REQUEST) {
+            int src = status.MPI_SOURCE;
+            pthread_mutex_lock(&ctx->taskMutex);
+            int shareCount = ctx->taskCount / 2;
+            Task *shareBuf = malloc(shareCount * sizeof(Task));
+            for (int i = 0; i < shareCount; ++i) {
+                shareBuf[i] = ctx->taskArray[--ctx->taskCount];
+            }
+            pthread_mutex_unlock(&ctx->taskMutex);
+
+            MPI_Send(&shareCount, 1, MPI_INT, src, TAG_TASK_INFO, MPI_COMM_WORLD);
+
+            if (shareCount > 0) {
+                MPI_Send(shareBuf, shareCount * sizeof(Task), MPI_BYTE, src, TAG_TASK_DATA, MPI_COMM_WORLD);
+            }
+            free(shareBuf);
+        }
+        else if (status.MPI_TAG == TAG_TERMINATE) {
+            break;
+        }
     }
     return NULL;
+}
+
+void defaultDistribution(Context *ctx, Task *initial) {
+    for (int i = 0; i < INITIAL_TASK_COUNT; i++) {
+        initial[i].repeatNum = 1;
+    }
+}
+
+void increasingDistribution(Context *ctx, Task *initial) {
+    int totalTasks = ctx->size * INITIAL_TASK_COUNT;
+    for (int i = 0; i < INITIAL_TASK_COUNT; i++) {
+        double currNumTask = (INITIAL_TASK_COUNT * (ctx->rank) + i);
+        double factor = currNumTask / totalTasks;
+        initial[i].repeatNum = factor * 100000;
+    }
+}
+
+void decreasingDistribution(Context *ctx, Task *initial) {
+    int totalTasks = ctx->size * INITIAL_TASK_COUNT;
+    for (int i = 0; i < INITIAL_TASK_COUNT; i++) {
+        double currNumTask = (INITIAL_TASK_COUNT * (ctx->rank) + i);
+        double factor = (totalTasks - currNumTask) / totalTasks;
+        initial[i].repeatNum = factor * 100000;
+    }
+}
+
+
+void sinDistribution(Context *ctx, Task *initial) {
+    int totalTasks = ctx->size * INITIAL_TASK_COUNT;
+    double step = M_PI / totalTasks;
+    for (int i = 0; i < INITIAL_TASK_COUNT; i++) {
+        double currNumTask = (INITIAL_TASK_COUNT * (ctx->rank) + i);
+        double radian = step * currNumTask;
+        double s = sin(radian);
+        initial[i].repeatNum = s * 100000;
+    }
+}
+
+
+void firstAllDistribution(Context *ctx, Task *initial) {
+    if (ctx->rank == 0) {
+        defaultDistribution(ctx, initial);
+    }
+}
+
+void firstHalfAllDistribution(Context *ctx, Task *initial) {
+    if (ctx->rank < ctx->size / 2) {
+        defaultDistribution(ctx, initial);
+    }
+}
+
+void normalizeGlobal(Task *initial, int N) {
+    double localSum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        localSum += initial[i].repeatNum;
+    }
+
+    double globalSum = 0.0;
+    MPI_Allreduce(&localSum, &globalSum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+    if (globalSum > 0.0) {
+        double factor = TOTAL_WEIGHT / globalSum;
+        for (int i = 0; i < N; ++i) {
+            initial[i].repeatNum = (int)(initial[i].repeatNum * factor);
+        }
+    }
+}
+
+void printTotalWeightAllTasks(Context *ctx, Task *initial) {
+    double localSum = 0.0;
+    for (int i = 0; i < INITIAL_TASK_COUNT; ++i) {
+        localSum += initial[i].repeatNum;
+    }
+
+    printf("Rank %d: inited %d\n", ctx->rank, (int)localSum);
+    fflush(stdout);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    double globalSum = 0.0;
+    MPI_Allreduce(&localSum, &globalSum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    if (ctx->rank == 0) {
+        printf("total normalized complexity = %.0f\n", globalSum);
+        fflush(stdout);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
 }

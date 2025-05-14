@@ -1,40 +1,49 @@
 #ifndef MAIN_H
 #define MAIN_H
 
+#include <mpi.h>
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <math.h>
-#include <pthread.h>
-#include <mpi.h>
 
-#define ITER_MAX         10
-#define TASKS_PER_ITER  100
+#define INITIAL_TASK_COUNT 200
+#define TOTAL_WEIGHT 2e9
 
-enum {
-    TAG_REQUEST   = 1,
-    TAG_RESPONSE  = 2,
-    TAG_TERMINATE = 3
-};
+#define TAG_REQUEST   1
+#define TAG_TASK_INFO 2
+#define TAG_TASK_DATA 3
+#define TAG_TERMINATE 4
 
 typedef struct {
-    int  *data;
-    int   size;
-    int   capacity;
-    pthread_mutex_t mutex;
-} TaskQueue;
+    int repeatNum;
+} Task;
 
 typedef struct {
-    TaskQueue *queue;
-    int        rank, size;
-    MPI_Comm   comm;
-    double    *globalRes;
-} ThreadArgs;
+    Task        *taskArray;
+    int          taskCount;
+    int          inProgress;
+    double       globalRes;
+    int          rank;
+    int          size;
+    int          provided;
+    MPI_Comm     recv_comm;
+    pthread_mutex_t taskMutex;
+} Context;
 
-int pop_task(TaskQueue *q, int *task);
-double heavy_compute(int repeats);
-int split_tasks(TaskQueue *q, int **out);
-void *listener_thread(void *v);
-void *worker_thread(void *v);
+void addTasks(Context *ctx, const Task *tasks, int count);
+bool fetchTask(Context *ctx, int *rep);
+void *receiverThread(void *arg);
+
+void defaultDistribution(Context* ctx, Task *initial);
+void increasingDistribution(Context *ctx, Task *initial);
+void decreasingDistribution(Context *ctx, Task *initial);
+void sinDistribution(Context *ctx, Task *initial);
+void firstAllDistribution(Context *ctx, Task *initial);
+void firstHalfAllDistribution(Context *ctx, Task *initial);
+
+void normalizeGlobal(Task *initial, int N);
+void printTotalWeightAllTasks(Context *ctx, Task *initial);
 
 #endif

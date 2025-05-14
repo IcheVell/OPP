@@ -1,1 +1,6 @@
+.vscode
 main
+client
+client.c
+server.c
+server
